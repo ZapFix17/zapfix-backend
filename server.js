@@ -2,82 +2,105 @@ import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
-import { v2 as cloudinary } from "cloudinary";
 import multer from "multer";
+import { v2 as cloudinary } from "cloudinary";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
 
 dotenv.config();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Connect MongoDB
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("❌ MongoDB Error:", err));
-
-// Cloudinary config
+// ========== Cloudinary Config ==========
 cloudinary.config({
-  cloud_name: process.env.CLOUD_NAME,
-  api_key: process.env.CLOUD_API_KEY,
-  api_secret: process.env.CLOUD_API_SECRET,
+  cloud_name: process.env.CLOUD_NAME || "dvj0h4vkw",
+  api_key: process.env.API_KEY || "938482952871232",
+  api_secret: process.env.API_SECRET || "mVuK4bhXbzJB45Rq-BkGotoQft0",
 });
 
-// Multer Storage
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: async (req, file) => {
-    let folder = "ZapFix";
-    let resource_type = "auto";
-    return {
-      folder: folder,
-      resource_type: resource_type,
-    };
-  },
-});
-const upload = multer({ storage: storage });
+// ========== MongoDB Connection ==========
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  "mongodb+srv://Zapfix:Zapfix123@cluster0.lx3ihzh.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 
-// Schema
+mongoose
+  .connect(MONGO_URI)
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch((err) => console.error("❌ MongoDB Connection Error:", err));
+
+// ========== Mongoose Schema ==========
 const videoSchema = new mongoose.Schema({
   title: String,
   description: String,
   thumbnail: String,
-  videoUrl: String,
+  video: String,
+  createdAt: { type: Date, default: Date.now },
 });
+
 const Video = mongoose.model("Video", videoSchema);
 
-// Upload route
-app.post("/api/upload", upload.fields([{ name: "thumbnail" }, { name: "video" }]), async (req, res) => {
+// ========== Multer Cloudinary Setup ==========
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: async (req, file) => {
+    let folder = "zapfix";
+    let resource_type = "auto"; // handles both image/video
+    return {
+      folder,
+      resource_type,
+      public_id: file.originalname.split(".")[0],
+    };
+  },
+});
+
+const upload = multer({ storage });
+
+// ========== API ROUTES ==========
+
+// ➤ Upload video and thumbnail
+app.post("/upload", upload.fields([{ name: "video" }, { name: "thumbnail" }]), async (req, res) => {
   try {
-    const thumbnail = req.files["thumbnail"][0].path;
-    const videoUrl = req.files["video"][0].path;
+    const { title, description } = req.body;
+    const videoFile = req.files["video"]?.[0];
+    const thumbFile = req.files["thumbnail"]?.[0];
+
+    if (!videoFile || !thumbFile) {
+      return res.status(400).json({ success: false, message: "Missing files" });
+    }
 
     const newVideo = new Video({
-      title: req.body.title,
-      description: req.body.description,
-      thumbnail,
-      videoUrl,
+      title,
+      description,
+      video: videoFile.path,
+      thumbnail: thumbFile.path,
     });
 
     await newVideo.save();
-    res.status(200).json({ message: "✅ Uploaded successfully!" });
+
+    res.json({ success: true, message: "Uploaded successfully", video: newVideo });
   } catch (error) {
-    console.error("❌ Upload Error:", error);
-    res.status(500).json({ error: "Upload failed!" });
+    console.error("❌ Upload error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-// Fetch all videos
-app.get("/api/videos", async (req, res) => {
+// ➤ Get all videos
+app.get("/videos", async (req, res) => {
   try {
-    const videos = await Video.find().sort({ _id: -1 });
-    res.json(videos);
+    const videos = await Video.find().sort({ createdAt: -1 });
+    res.json({ success: true, videos });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch videos" });
+    console.error("❌ Fetch error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-app.get("/", (req, res) => res.send("ZapFix backend is running"));
+// ➤ Default route
+app.get("/", (req, res) => {
+  res.send("ZapFix Backend Running ✅");
+});
+
+// ========== Start Server ==========
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
