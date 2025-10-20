@@ -1,187 +1,181 @@
 // server.js
-import express from "express";
-import mongoose from "mongoose";
-import cors from "cors";
-import dotenv from "dotenv";
-import multer from "multer";
-import { v2 as cloudinary } from "cloudinary";
-import { CloudinaryStorage } from "multer-storage-cloudinary";
-import jwt from "jsonwebtoken";
-import bodyParser from "body-parser";
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
+import { CloudinaryStorage } from 'multer-storage-cloudinary';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-
-// Middlewares
 app.use(cors());
 app.use(express.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log("MongoDB connected"))
-.catch(err => console.error("MongoDB error:", err));
+// ===== MONGOOSE MODELS =====
+const videoSchema = new mongoose.Schema({
+  title: String,
+  description: String,
+  thumbnail: String,
+  video: String,
+  comments: [{ name: String, text: String }]
+});
+const Video = mongoose.model('Video', videoSchema);
 
-// Cloudinary config
+const adminSchema = new mongoose.Schema({
+  username: String,
+  password: String
+});
+const Admin = mongoose.model('Admin', adminSchema);
+
+// ===== CLOUDINARY CONFIG =====
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
   api_key: process.env.CLOUD_API_KEY,
   api_secret: process.env.CLOUD_API_SECRET
 });
 
-// Storage setup
 const storage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: "ZapFix_upload",
-    allowed_formats: ["jpg", "jpeg", "png", "mp4", "mov", "avi"],
-    resource_type: "auto"
+    folder: 'zapfix',
+    allowed_formats: ['jpg','png','mp4'],
+    resource_type: 'auto'
   }
 });
 
 const upload = multer({ storage });
 
-// JWT Middleware
-const verifyToken = (req, res, next) => {
-  const token = req.headers["authorization"];
-  if(!token) return res.status(401).json({ success: false, message: "Access denied" });
+// ===== MONGODB CONNECT =====
+const mongoUri = process.env.MONGO_URI;
+if (!mongoUri) {
+  console.error("❌ MONGO_URI is undefined! Set it in .env or Render environment.");
+  process.exit(1);
+}
 
+mongoose.connect(mongoUri)
+.then(() => console.log("✅ MongoDB connected"))
+.catch(err => console.error("MongoDB connection error:", err));
+
+// ===== ADMIN LOGIN =====
+app.post('/admin/login', async (req,res)=>{
+  const { username, password } = req.body;
+  const admin = await Admin.findOne({ username });
+  if(!admin) return res.status(401).json({ success:false, message:"Invalid credentials" });
+  const match = await bcrypt.compare(password, admin.password);
+  if(!match) return res.status(401).json({ success:false, message:"Invalid credentials" });
+
+  const token = jwt.sign({ id: admin._id }, process.env.JWT_SECRET, { expiresIn:'7d' });
+  res.json({ success:true, token });
+});
+
+// ===== MIDDLEWARE =====
+const authMiddleware = (req,res,next)=>{
+  const token = req.headers['authorization']?.split(' ')[1];
+  if(!token) return res.status(401).json({ success:false, message:"No token" });
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.admin = decoded;
+    req.adminId = decoded.id;
     next();
-  } catch(err) {
-    return res.status(401).json({ success: false, message: "Invalid token" });
+  } catch(err){
+    return res.status(401).json({ success:false, message:"Invalid token" });
   }
 };
 
-// Schemas
-const videoSchema = new mongoose.Schema({
-  title: String,
-  description: String,
-  thumbnail: String,
-  video: String,
-  comments: [
-    {
-      name: String,
-      text: String,
-      _id: { type: mongoose.Schema.Types.ObjectId, auto: true }
-    }
-  ],
-  createdAt: { type: Date, default: Date.now }
-});
+// ===== VIDEO ROUTES =====
 
-const Video = mongoose.model("Video", videoSchema);
-
-// Routes
-
-// Admin login
-app.post("/admin/login", (req, res) => {
-  const { username, password } = req.body;
-
-  // Replace with your credentials
-  if(username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS){
-    const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1d" });
-    return res.json({ success: true, token });
-  }
-  return res.status(401).json({ success: false, message: "Invalid credentials" });
-});
-
-// Upload video (admin only)
-app.post("/upload", verifyToken, upload.fields([{ name: "video" }, { name: "thumbnail" }]), async (req, res) => {
-  try{
+// Upload video + thumbnail
+app.post('/upload', upload.fields([{name:'video', maxCount:1},{name:'thumbnail', maxCount:1}]), async (req,res)=>{
+  try {
     const { title, description } = req.body;
-    const videoFile = req.files["video"][0].path;
-    const thumbFile = req.files["thumbnail"][0].path;
+    const videoFile = req.files['video'][0];
+    const thumbFile = req.files['thumbnail'][0];
 
-    const newVideo = new Video({
+    const newVideo = await Video.create({
       title,
       description,
-      video: videoFile,
-      thumbnail: thumbFile
+      video: videoFile.path,
+      thumbnail: thumbFile.path,
+      comments:[]
     });
 
-    await newVideo.save();
-    res.json({ success: true, video: videoFile, thumbnail: thumbFile });
+    res.json({ success:true, video:newVideo.video, thumbnail:newVideo.thumbnail });
   } catch(err){
     console.error(err);
-    res.status(500).json({ success: false, message: "Upload failed" });
+    res.status(500).json({ success:false, message:"Upload failed" });
   }
 });
 
 // Get all videos
-app.get("/videos", async (req, res) => {
-  try{
-    const videos = await Video.find().sort({ createdAt: -1 });
+app.get('/videos', async (req,res)=>{
+  try {
+    const videos = await Video.find();
     res.json(videos);
   } catch(err){
-    console.error(err);
-    res.status(500).json({ success: false, message: "Cannot fetch videos" });
-  }
-});
-
-// Delete video (admin)
-app.delete("/videos/:id", verifyToken, async (req, res) => {
-  try{
-    await Video.findByIdAndDelete(req.params.id);
-    res.json({ success: true });
-  } catch(err){
-    console.error(err);
-    res.status(500).json({ success: false, message: "Delete failed" });
-  }
-});
-
-// Update video title/description/thumbnail (admin)
-app.put("/videos/:id", verifyToken, upload.single("thumbnail"), async (req, res) => {
-  try{
-    const updateData = {};
-    if(req.body.title) updateData.title = req.body.title;
-    if(req.body.description) updateData.description = req.body.description;
-    if(req.file) updateData.thumbnail = req.file.path;
-
-    const updatedVideo = await Video.findByIdAndUpdate(req.params.id, updateData, { new: true });
-    res.json({ success: true, video: updatedVideo });
-  } catch(err){
-    console.error(err);
-    res.status(500).json({ success: false, message: "Update failed" });
+    res.status(500).json({ success:false, message:"Failed to fetch videos" });
   }
 });
 
 // Add comment
-app.post("/videos/:id/comment", async (req, res) => {
-  try{
-    const { name, text } = req.body;
+app.post('/videos/:id/comment', async (req,res)=>{
+  const { name, text } = req.body;
+  try {
     const video = await Video.findById(req.params.id);
-    if(!video) return res.status(404).json({ success: false, message: "Video not found" });
-
     video.comments.push({ name, text });
     await video.save();
-    res.json({ success: true, comments: video.comments });
+    res.json({ success:true, comments:video.comments });
   } catch(err){
-    console.error(err);
-    res.status(500).json({ success: false, message: "Cannot add comment" });
+    res.status(500).json({ success:false, message:"Failed to add comment" });
   }
 });
 
-// Delete comment (admin)
-app.delete("/videos/:videoId/comment/:commentId", verifyToken, async (req, res) => {
-  try{
+// ===== ADMIN PANEL =====
+
+// Delete video
+app.delete('/admin/video/:id', authMiddleware, async (req,res)=>{
+  try {
+    await Video.findByIdAndDelete(req.params.id);
+    res.json({ success:true });
+  } catch(err){
+    res.status(500).json({ success:false});
+  }
+});
+
+// Edit video (title/description + optional thumbnail)
+app.put('/admin/video/:id', authMiddleware, upload.single('thumbnail'), async (req,res)=>{
+  try {
+    const { title, description } = req.body;
+    const updateData = { title, description };
+    if(req.file) updateData.thumbnail = req.file.path;
+    const video = await Video.findByIdAndUpdate(req.params.id, updateData, { new:true });
+    res.json({ success:true, video });
+  } catch(err){
+    res.status(500).json({ success:false });
+  }
+});
+
+// Delete comment
+app.delete('/admin/comment/:videoId/:commentIndex', authMiddleware, async (req,res)=>{
+  try {
     const video = await Video.findById(req.params.videoId);
-    if(!video) return res.status(404).json({ success: false, message: "Video not found" });
-
-    video.comments = video.comments.filter(c => c._id.toString() !== req.params.commentId);
+    video.comments.splice(req.params.commentIndex,1);
     await video.save();
-    res.json({ success: true, comments: video.comments });
+    res.json({ success:true });
   } catch(err){
-    console.error(err);
-    res.status(500).json({ success: false, message: "Cannot delete comment" });
+    res.status(500).json({ success:false });
   }
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ===== STATIC FILES =====
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ===== START SERVER =====
+const port = process.env.PORT || 5000;
+app.listen(port, ()=>console.log(`🚀 Server running on port ${port}`));
